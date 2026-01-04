@@ -18,6 +18,7 @@
  */
 
 #include "uhub.h"
+#include <time.h>
 
 // Used to convert binary to uppercase ascii base32
 const char* BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -658,5 +659,76 @@ char* strip_off_quotes(char* line)
 		return line + 1;
 	}
 	return line;
+}
+
+static uint32_t rand_state = 0;
+
+uint32_t uhub_rand()
+{
+	if (rand_state == 0)
+	{
+		rand_state = (uint32_t)time(NULL);
+	}
+	
+	/* Simple linear congruential generator */
+	rand_state = rand_state * 1103515245 + 12345;
+	return (rand_state >> 16) & 0x7FFF;
+}
+
+char* generate_hbri_token(char* buffer, size_t size)
+{
+	uint32_t random_num;
+	uint8_t bytes[5];
+	size_t i;
+	
+	if (size < 9) /* 8 chars + null terminator */
+		return NULL;
+	
+	/* Generate 5 random bytes (40 bits) */
+	random_num = uhub_rand();
+	bytes[0] = (random_num >> 24) & 0xFF;
+	bytes[1] = (random_num >> 16) & 0xFF;
+	bytes[2] = (random_num >> 8) & 0xFF;
+	bytes[3] = random_num & 0xFF;
+	
+	random_num = uhub_rand();
+	bytes[4] = random_num & 0xFF;
+	
+	/* Encode 5 bytes (40 bits) as 8 base32 characters */
+	for (i = 0; i < 8; i++)
+	{
+		uint8_t v;
+		
+		if (i < 5)
+		{
+			/* Get 5-bit chunks from the 5 bytes */
+			switch (i)
+			{
+				case 0: v = (bytes[0] >> 3) & 0x1F; break;
+				case 1: v = ((bytes[0] << 2) & 0x1C) | ((bytes[1] >> 6) & 0x03); break;
+				case 2: v = (bytes[1] >> 1) & 0x1F; break;
+				case 3: v = ((bytes[1] << 4) & 0x10) | ((bytes[2] >> 4) & 0x0F); break;
+				case 4: v = ((bytes[2] << 1) & 0x1E) | ((bytes[3] >> 7) & 0x01); break;
+				case 5: v = (bytes[3] >> 2) & 0x1F; break;
+				case 6: v = ((bytes[3] << 3) & 0x18) | ((bytes[4] >> 5) & 0x07); break;
+				case 7: v = bytes[4] & 0x1F; break;
+			}
+		}
+		else
+		{
+			/* For positions 5-7, we need to handle the remaining bits */
+			switch (i)
+			{
+				case 5: v = (bytes[3] >> 2) & 0x1F; break;
+				case 6: v = ((bytes[3] << 3) & 0x18) | ((bytes[4] >> 5) & 0x07); break;
+				case 7: v = bytes[4] & 0x1F; break;
+			}
+		}
+		
+		buffer[i] = BASE32_ALPHABET[v];
+	}
+	
+	buffer[8] = '\0';
+	return buffer;
 }
 

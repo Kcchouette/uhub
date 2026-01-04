@@ -724,4 +724,43 @@
 		<since>0.3.1</since>
 	</option>
 
+	<option name="hbri_enable" type="boolean" default="0">
+		<short>Enable HBRI (Hybrid Bridge) support</short>
+		<description><![CDATA[
+			Enable HBRI (Hybrid Bridge) support for IPv4/IPv6 cross-connectivity validation.
+			When enabled, users claiming to have IP addresses of a different version than
+			their connection (e.g., IPv6 user claiming IPv4 address) will need to validate
+			they actually have that IP address through a separate TCP connection.
+		]]></description>
+		<syntax>
+			0 = disabled, 1 = enabled
+		</syntax>
+		<since>0.5.2</since>
+		<example><![CDATA[
+				<p>
+				To enable HBRI support for hybrid IPv4/IPv6 hubs:<br />
+				hbri_enable = 1
+				</p>
+				<p>
+				To disable HBRI support:<br />
+				hbri_enable = 0
+				</p>
+		]]></example>
+	</option>
+
+	<option name="msg_hbri_timeout" type="message" default="HBRI validation timeout">
+		<description><![CDATA[This message is sent when HBRI validation times out.]]></description>
+		<since>0.5.2</since>
+	</option>
+
+	<option name="msg_hbri_validation_failed" type="message" default="HBRI validation failed">
+		<description><![CDATA[This message is sent when HBRI validation fails.]]></description>
+		<since>0.5.2</since>
+	</option>
+
+	<option name="msg_hbri_ip_mismatch" type="message" default="IP address mismatch in HBRI validation">
+		<description><![CDATA[This message is sent when the IP address in HBRI validation doesn't match the claimed IP.]]></description>
+		<since>0.5.2</since>
+	</option>
+
 </config>

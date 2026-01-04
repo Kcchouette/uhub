@@ -49,6 +49,14 @@ enum nick_status
  */
 extern int hub_handle_info(struct hub_info* hub, struct hub_user* u, const struct adc_message* cmd);
 
+/**
+ * Handle info messages during login process.
+ * This is used internally by hub_handle_info and for continuing login
+ * after HBRI validation.
+ * @return 0 on success, negative status code on error
+ */
+extern int hub_handle_info_login(struct hub_info* hub, struct hub_user* user, struct adc_message* cmd);
+
 
 #endif /* HAVE_UHUB_INF_PARSER_H */
 

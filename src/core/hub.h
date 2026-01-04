@@ -56,6 +56,10 @@ enum status_message
 	status_msg_proto_no_common_hash      = -50, /* No common hash algorithms */
 	status_msg_proto_obsolete_adc0       = -51, /* Client is using an obsolete protocol version */
 
+	status_msg_hbri_timeout              = -52, /* HBRI validation timeout */
+	status_msg_hbri_validation_failed    = -53, /* HBRI validation failed */
+	status_msg_hbri_ip_mismatch          = -54, /* HBRI IP address mismatch */
+
 
 };
 
@@ -84,6 +88,18 @@ struct hub_stats
 	struct timeout_evt* timeout;    /**<< "Timeout handler for statistics" */
 };
 
+/**
+ * Structure for tracking pending HBRI (Hybrid Bridge) validations.
+ * Used to match validation TCP connections with the users being validated.
+ */
+struct hbri_pending_entry
+{
+	char token[9];                 /** Validation token (8 chars + null) */
+	struct hub_user* user;         /** User being validated */
+	time_t expires;                /** Time when validation expires */
+	uint8_t ip_version;            /** IP version being validated (4 or 6) */
+};
+
 struct hub_info
 {
 	struct net_connection* server;
@@ -98,6 +114,8 @@ struct hub_info
 	struct adc_message* command_banner;  /* The default welcome message */
 	time_t tm_started;
 	enum hub_state status;
+	struct linked_list* hbri_pending;    /* Pending HBRI validations */
+	struct timeout_evt* hbri_timeout;    /* Timeout handler for HBRI validation cleanup */
 	char* recvbuf; /* Global receive buffer */
 	char* sendbuf; /* Global send buffer */
 
@@ -138,6 +156,41 @@ extern int hub_handle_password(struct hub_info* hub, struct hub_user* u, struct 
  * @return 0 on success, -1 on error.
  */
 extern int hub_handle_chat_message(struct hub_info* hub, struct hub_user* u, struct adc_message* cmd);
+
+/**
+ * Handle TCP validation messages for HBRI (Hybrid Bridge).
+ * @return 0 on success, -1 on error.
+ */
+extern int hub_handle_tcp(struct hub_info* hub, struct hub_user* u, struct adc_message* cmd);
+
+/**
+ * Initiate HBRI validation for a user.
+ * This is called when a user needs to validate they have an IP address
+ * of a different version than their connection (e.g., IPv6 user claiming IPv4).
+ * @param hub Hub instance
+ * @param user User to validate
+ * @param ip_version IP version to validate (4 or 6)
+ * @return 0 on success, -1 on error
+ */
+extern int hub_initiate_hbri_validation(struct hub_info* hub, struct hub_user* user, uint8_t ip_version);
+
+/**
+ * Continue user login after successful HBRI validation.
+ * @param hub Hub instance
+ * @param user User who passed HBRI validation
+ * @return 0 on success, -1 on error
+ */
+extern int hub_continue_login_after_hbri(struct hub_info* hub, struct hub_user* user);
+
+/**
+ * Handle failed HBRI validation by allowing user to continue without validated IP.
+ * This is called when HBRI validation fails or times out.
+ * @param hub Hub instance
+ * @param user User who failed HBRI validation
+ */
+extern void hub_fail_hbri_validation(struct hub_info* hub, struct hub_user* user);
+
+
 
 /**
  * Used internally by hub_handle_info

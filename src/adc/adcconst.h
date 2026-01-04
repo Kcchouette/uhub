@@ -92,6 +92,7 @@ typedef uint32_t fourcc_t;
 
 /* Extension messages */
 #define ADC_CMD_HCHK FOURCC('H','C','H','K')
+#define ADC_CMD_TCP  FOURCC('T','C','P',' ') /* HBRI validation command */
 
 /* UCMD Extension */
 #define ADC_CMD_BCMD FOURCC('B','C','M','D')

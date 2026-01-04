@@ -63,6 +63,10 @@ extern void* list_get_first(struct linked_list*);
 extern void* list_get_last(struct linked_list*);
 extern void* list_get_next(struct linked_list*);
 extern void* list_get_prev(struct linked_list*);
+extern void* list_get(struct node*);
+extern struct node* list_get_first_node(struct linked_list*);
+extern struct node* list_get_current_node(struct linked_list*);
+extern void list_remove_node(struct linked_list*, struct node*);
 
 /**
  * Remove the first element, and call the free_handle function (if not NULL)

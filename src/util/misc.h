@@ -98,6 +98,21 @@ extern int string_split(const char* string, const char* split, void* data, strin
 extern const char* BASE32_ALPHABET;
 extern const int8_t BASE32_VALUES[128];
 
+/**
+ * Generate a random number.
+ * @return a random unsigned 32-bit integer
+ */
+extern uint32_t uhub_rand();
+
+/**
+ * Generate a random token for HBRI validation.
+ * The token is a base32 encoded string of random bytes.
+ * @param buffer buffer to store the token (must be at least 9 bytes)
+ * @param size size of the buffer (must be at least 9 for null terminator)
+ * @return pointer to buffer on success, NULL on error
+ */
+extern char* generate_hbri_token(char* buffer, size_t size);
+
 #endif /* HAVE_UHUB_MISC_H */
 
 

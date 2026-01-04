@@ -270,6 +270,43 @@ void user_clear_feature_cast_support(struct hub_user* u)
 	}
 }
 
+void user_strip_feature_cast_for_hbri(struct hub_user* u, uint8_t ip_version)
+{
+	if (!u->feature_cast)
+		return;
+	
+	struct node* node = list_get_first_node(u->feature_cast);
+	struct node* next_node = NULL;
+	
+	while (node)
+	{
+		next_node = node->next;
+		char* feature = (char*) list_get(node);
+		
+		if (feature)
+		{
+			/* Strip TCP4/UDP4 if validating IPv4 */
+			if (ip_version == 4 && 
+			    (strncmp(feature, "TCP4", 4) == 0 || 
+			     strncmp(feature, "UDP4", 4) == 0))
+			{
+				list_remove_node(u->feature_cast, node);
+				hub_free(feature);
+			}
+			/* Strip TCP6/UDP6 if validating IPv6 */
+			else if (ip_version == 6 && 
+			         (strncmp(feature, "TCP6", 4) == 0 || 
+			          strncmp(feature, "UDP6", 4) == 0))
+			{
+				list_remove_node(u->feature_cast, node);
+				hub_free(feature);
+			}
+		}
+		
+		node = next_node;
+	}
+}
+
 int user_is_logged_in(struct hub_user* user)
 {
 	if (user->state == state_normal)
@@ -279,7 +316,7 @@ int user_is_logged_in(struct hub_user* user)
 
 int user_is_connecting(struct hub_user* user)
 {
-	if (user->state == state_protocol || user->state == state_identify || user->state == state_verify)
+	if (user->state == state_protocol || user->state == state_identify || user->state == state_verify || user->state == state_hbri_waiting)
 		return 1;
 	return 0;
 }
@@ -355,6 +392,7 @@ const char* user_get_quit_reason_string(enum user_quit_reason reason)
 		case quit_update_error:     return "update error";
 		case quit_hub_disabled:     return "hub disabled";
 		case quit_ghost_timeout:    return "ghost";
+		case quit_hbri:             return "hbri";
 	}
 
 	return "unknown";
@@ -363,6 +401,13 @@ const char* user_get_quit_reason_string(enum user_quit_reason reason)
 const char* user_get_address(struct hub_user* user)
 {
 	return ip_convert_to_string(&user->id.addr);
+}
+
+int user_is_ipv6(struct hub_user* user)
+{
+	if (!user)
+		return 0;
+	return user->id.addr.af == AF_INET6;
 }
 
 

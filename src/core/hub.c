@@ -18,8 +18,12 @@
  */
 
 #include "uhub.h"
+#include "inf.h"
 
 struct hub_info* g_hub = 0;
+
+/* Forward declarations for static functions */
+static void hub_hbri_timeout_callback(struct timeout_evt* t);
 
 /* FIXME: Flood control should be done in a plugin! */
 #define CHECK_FLOOD(TYPE, WARN) \
@@ -138,6 +142,11 @@ int hub_handle_message(struct hub_info* hub, struct hub_user* u, const char* lin
 			case ADC_CMD_FCMD:
 			case ADC_CMD_HCMD:
 				CHECK_FLOOD(extras, 1);
+				break;
+
+			case ADC_CMD_TCP:
+				CHECK_FLOOD(extras, 0);
+				ret = hub_handle_tcp(hub, u, cmd);
 				break;
 
 			default:
@@ -823,6 +832,19 @@ struct hub_info* hub_start_service(struct hub_config* config)
 
 	hub->status = hub_status_running;
 
+	// Initialize HBRI pending validations list
+	hub->hbri_pending = list_create();
+	if (!hub->hbri_pending)
+	{
+		LOG_ERROR("Unable to allocate memory for HBRI pending list");
+		net_con_close(hub->server);
+		hub_free(hub->recvbuf);
+		hub_free(hub->sendbuf);
+		uman_shutdown(hub->users);
+		hub_free(hub);
+		return 0;
+	}
+
 	g_hub = hub;
 
 	if (net_backend_get_timeout_queue())
@@ -830,6 +852,17 @@ struct hub_info* hub_start_service(struct hub_config* config)
 		hub->stats.timeout = hub_malloc_zero(sizeof(struct timeout_evt));
 		timeout_evt_initialize(hub->stats.timeout, hub_timer_statistics, hub);
 		timeout_queue_insert(net_backend_get_timeout_queue(), hub->stats.timeout, TIMEOUT_STATS);
+	}
+
+	// Initialize HBRI timeout handler
+	if (net_backend_get_timeout_queue())
+	{
+		hub->hbri_timeout = hub_malloc_zero(sizeof(struct timeout_evt));
+		if (hub->hbri_timeout)
+		{
+			timeout_evt_initialize(hub->hbri_timeout, hub_hbri_timeout_callback, hub);
+			timeout_queue_insert(net_backend_get_timeout_queue(), hub->hbri_timeout, 1); // Check every second
+		}
 	}
 
 	// Start the hub command sub-system
@@ -857,6 +890,24 @@ void hub_shutdown_service(struct hub_info* hub)
 	server_alt_port_stop(hub);
 	uman_shutdown(hub->users);
 	hub->status = hub_status_stopped;
+
+	// Clean up HBRI pending list
+	if (hub->hbri_pending)
+	{
+		list_clear(hub->hbri_pending, NULL); // Entries will be freed below
+		list_destroy(hub->hbri_pending);
+	}
+
+	// Clean up HBRI timeout handler
+	if (hub->hbri_timeout)
+	{
+		if (timeout_evt_is_scheduled(hub->hbri_timeout))
+		{
+			timeout_queue_remove(net_backend_get_timeout_queue(), hub->hbri_timeout);
+		}
+		hub_free(hub->hbri_timeout);
+	}
+
 	hub_free(hub->sendbuf);
 	hub_free(hub->recvbuf);
 	command_shutdown(hub->commands);
@@ -914,10 +965,22 @@ void hub_set_variables(struct hub_info* hub, struct acl_handle* acl)
 			adc_msg_add_named_argument_string(hub->command_info, ADC_INF_FLAG_FAILOVER_ADDR, hub->config->failover_redirect_addr);
 	}
 
-	hub->command_support = adc_msg_construct(ADC_CMD_ISUP, 6 + strlen(ADC_PROTO_SUPPORT));
-	if (hub->command_support)
+	/* Build support message with optional HBRI support */
+	if (hub->config->hbri_enable)
 	{
-		adc_msg_add_argument(hub->command_support, ADC_PROTO_SUPPORT);
+		hub->command_support = adc_msg_construct(ADC_CMD_ISUP, 6 + strlen(ADC_PROTO_SUPPORT) + 7); /* +7 for " ADHBRI" */
+		if (hub->command_support)
+		{
+			adc_msg_add_argument(hub->command_support, ADC_PROTO_SUPPORT " ADHBRI");
+		}
+	}
+	else
+	{
+		hub->command_support = adc_msg_construct(ADC_CMD_ISUP, 6 + strlen(ADC_PROTO_SUPPORT));
+		if (hub->command_support)
+		{
+			adc_msg_add_argument(hub->command_support, ADC_PROTO_SUPPORT);
+		}
 	}
 
 	hub->command_banner = adc_msg_construct(ADC_CMD_ISTA, 100 + strlen(server));
@@ -1022,6 +1085,9 @@ void hub_send_status(struct hub_info* hub, struct hub_user* user, enum status_me
 		STATUS(43, msg_user_hub_limit_high, 0, 0, 1);
 		STATUS(47, msg_proto_no_common_hash, 0, -1, 1);
 		STATUS(40, msg_proto_obsolete_adc0, 0, -1, 1);
+		STATUS(55, msg_hbri_timeout, 0, 0, 0);
+		STATUS(56, msg_hbri_validation_failed, 0, 0, 0);
+		STATUS(57, msg_hbri_ip_mismatch, 0, 0, 0);
 	}
 #undef STATUS
 
@@ -1309,4 +1375,488 @@ void hub_disconnect_user(struct hub_info* hub, struct hub_user* user, int reason
 	{
 		hub_schedule_destroy_user(hub, user);
 	}
+}
+
+/**
+ * Handle TCP validation messages for HBRI (Hybrid Bridge).
+ * This command is used by clients to validate they have the IP addresses
+ * they claim to have, enabling IPv4/IPv6 cross-connectivity.
+ *
+ * @param hub Hub instance
+ * @param u User sending the command
+ * @param cmd TCP command message
+ * @return 0 on success, -1 on error
+ */
+int hub_handle_tcp(struct hub_info* hub, struct hub_user* u, struct adc_message* cmd)
+{
+	char* token = NULL;
+	struct hbri_pending_entry* entry = NULL;
+	struct node* node = NULL;
+	struct hub_user* validated_user = NULL;
+	char* claimed_ip = NULL;
+	const char* actual_ip = NULL;
+	int ip_version_to_validate = 0;
+	int validation_success = 0;
+	struct adc_message* sta_cmd = NULL;
+	int validation_is_ipv6 = 0;
+	int connection_is_ipv6 = 0;
+
+	/* Extract token from command */
+	token = adc_msg_get_named_argument(cmd, "TO");
+	if (!token)
+	{
+		LOG_INFO("HBRI: TCP validation command received from %s (%s)",
+			sid_to_string(u->id.sid), user_get_address(u));
+		/* Send error status */
+		hub_send_status(hub, u, status_msg_hbri_validation_failed, status_level_error);
+		return -1;
+	}
+
+	/* Look for token in pending validations */
+	entry = NULL;
+	node = list_get_first_node(hub->hbri_pending);
+	while (node)
+	{
+		entry = (struct hbri_pending_entry*) list_get(node);
+		if (entry && strcmp(entry->token, token) == 0)
+		{
+			break;
+		}
+		node = node->next;
+	}
+
+	if (!entry)
+	{
+		LOG_INFO("HBRI: Unknown validation token %s from %s (%s)",
+			token, sid_to_string(u->id.sid), user_get_address(u));
+		hub_free(token);
+		/* Send error status */
+		hub_send_status(hub, u, status_msg_hbri_validation_failed, status_level_error);
+		return -1;
+	}
+
+	validated_user = entry->user;
+	ip_version_to_validate = entry->ip_version;
+
+	LOG_INFO("HBRI: Validation token %s matched for user %s (nick: %s, validating IPv%d)",
+		token, sid_to_string(validated_user->id.sid),
+		validated_user->id.nick, ip_version_to_validate);
+
+	/* Check if validation is being performed over the correct IP protocol */
+	validation_is_ipv6 = (ip_version_to_validate == 6);
+	connection_is_ipv6 = user_is_ipv6(u);
+
+	if (validation_is_ipv6 == connection_is_ipv6)
+	{
+		LOG_INFO("HBRI: Validation request was received over the wrong IP protocol (validating IPv%d over %s connection)",
+			ip_version_to_validate, connection_is_ipv6 ? "IPv6" : "IPv4");
+		hub_free(token);
+		/* Send error status */
+		hub_send_status(hub, u, status_msg_hbri_validation_failed, status_level_error);
+		/* Disconnect validation connection */
+		hub_disconnect_user(hub, u, quit_hbri);
+		/* Allow main user to continue joining */
+		hub_fail_hbri_validation(hub, validated_user);
+		return -1;
+	}
+
+	/* Get the claimed IP address from the user's info */
+	if (ip_version_to_validate == 4)
+	{
+		claimed_ip = adc_msg_get_named_argument(validated_user->info, ADC_INF_FLAG_IPV4_ADDR);
+	}
+	else if (ip_version_to_validate == 6)
+	{
+		claimed_ip = adc_msg_get_named_argument(validated_user->info, ADC_INF_FLAG_IPV6_ADDR);
+	}
+
+	/* Get actual IP from validation connection */
+	actual_ip = user_get_address(u);
+
+	/* Parse and validate IP addresses properly */
+	if (claimed_ip && actual_ip)
+	{
+		/* Parse claimed IP */
+		struct ip_addr_encap claimed_addr;
+		struct ip_addr_encap actual_addr;
+		int claimed_valid = 0;
+		int actual_valid = 0;
+
+		/* Parse claimed IP address */
+		if (ip_version_to_validate == 4)
+		{
+			claimed_valid = (net_string_to_address(AF_INET, claimed_ip, &claimed_addr.internal_ip_data.in) > 0);
+			if (claimed_valid) claimed_addr.af = AF_INET;
+		}
+		else if (ip_version_to_validate == 6)
+		{
+			claimed_valid = (net_string_to_address(AF_INET6, claimed_ip, &claimed_addr.internal_ip_data.in6) > 0);
+			if (claimed_valid) claimed_addr.af = AF_INET6;
+		}
+
+		/* Parse actual IP address */
+		if (connection_is_ipv6)
+		{
+			actual_valid = (net_string_to_address(AF_INET6, actual_ip, &actual_addr.internal_ip_data.in6) > 0);
+			if (actual_valid) actual_addr.af = AF_INET6;
+		}
+		else
+		{
+			actual_valid = (net_string_to_address(AF_INET, actual_ip, &actual_addr.internal_ip_data.in) > 0);
+			if (actual_valid) actual_addr.af = AF_INET;
+		}
+
+		/* Check if IP addresses are valid and match */
+		if (claimed_valid && actual_valid && ip_compare(&claimed_addr, &actual_addr) == 0)
+		{
+			LOG_INFO("HBRI: IP validation successful for user %s (nick: %s, IPv%d: %s)",
+				sid_to_string(validated_user->id.sid), validated_user->id.nick,
+				ip_version_to_validate, actual_ip);
+			validation_success = 1;
+
+			/* Update user's validated IP status */
+			if (ip_version_to_validate == 4)
+			{
+				user_flag_set(validated_user, flag_ipv4_validated);
+			}
+			else if (ip_version_to_validate == 6)
+			{
+				user_flag_set(validated_user, flag_ipv6_validated);
+			}
+		}
+		else
+		{
+			if (!claimed_valid)
+			{
+				LOG_INFO("HBRI: Invalid claimed IP address %s for user %s (nick: %s)",
+					claimed_ip, sid_to_string(validated_user->id.sid), validated_user->id.nick);
+			}
+			else if (!actual_valid)
+			{
+				LOG_INFO("HBRI: Invalid actual IP address %s from validation connection",
+					actual_ip);
+			}
+			else
+			{
+				LOG_INFO("HBRI: IP validation failed for user %s (nick: %s, claimed IPv%d: %s, actual: %s)",
+					sid_to_string(validated_user->id.sid), validated_user->id.nick,
+					ip_version_to_validate, claimed_ip, actual_ip);
+			}
+			validation_success = 0;
+		}
+	}
+	else
+	{
+		LOG_INFO("HBRI: Missing IP address for validation (claimed: %s, actual: %s)",
+			claimed_ip ? claimed_ip : "none", actual_ip ? actual_ip : "none");
+		validation_success = 0;
+	}
+
+	/* Send status to validation connection */
+	if (validation_success)
+	{
+		/* Send success status (code 000) */
+		sta_cmd = adc_msg_construct(ADC_CMD_ISTA, 64);
+		adc_msg_add_argument(sta_cmd, "000");
+		adc_msg_add_argument_string(sta_cmd, "Validation successful");
+		route_to_user(hub, u, sta_cmd);
+		adc_msg_free(sta_cmd);
+	}
+	else
+	{
+		/* Send IP mismatch error */
+		hub_send_status(hub, u, status_msg_hbri_ip_mismatch, status_level_error);
+	}
+
+	/* Disconnect validation connection */
+	hub_disconnect_user(hub, u, quit_hbri);
+
+	/* Remove from pending list */
+	if (node)
+	{
+		list_remove_node(hub->hbri_pending, node);
+		hub_free(entry);
+	}
+
+	/* Clear user's HBRI validating flag */
+	user_flag_unset(validated_user, flag_hbri_validating);
+
+	/* Handle validation result */
+	if (validation_success && validated_user->state == state_hbri_waiting)
+	{
+		/* If validation was successful and user was waiting, continue login */
+		LOG_INFO("HBRI: Continuing login for user %s (nick: %s) after successful validation",
+			sid_to_string(validated_user->id.sid), validated_user->id.nick);
+		hub_continue_login_after_hbri(hub, validated_user);
+	}
+	else if (!validation_success && validated_user->state == state_hbri_waiting)
+	{
+		/* If validation failed and user was waiting, allow them to continue without the validated IP */
+		LOG_INFO("HBRI: Validation failed for user %s (nick: %s), allowing to continue without validated IP",
+			sid_to_string(validated_user->id.sid), validated_user->id.nick);
+		hub_fail_hbri_validation(hub, validated_user);
+	}
+
+	if (claimed_ip)
+		hub_free(claimed_ip);
+	hub_free(token);
+
+	return 0;
+}
+
+/**
+ * Handle failed HBRI validation by allowing user to continue without validated IP.
+ * This is called when HBRI validation fails or times out.
+ *
+ * @param hub Hub instance
+ * @param user User who failed HBRI validation
+ */
+void hub_fail_hbri_validation(struct hub_info* hub, struct hub_user* user)
+{
+	if (!user || user->state != state_hbri_waiting)
+		return;
+
+	LOG_INFO("HBRI: Allowing user %s (nick: %s) to continue without validated IP",
+		sid_to_string(user->id.sid), user->id.nick);
+
+	/* Clear HBRI validating flag */
+	user_flag_unset(user, flag_hbri_validating);
+
+	/* Strip the IP address that requires validation from the stored INF */
+	if (user->info)
+	{
+		if (user->hbri_ip_version == 4)
+		{
+			adc_msg_remove_named_argument(user->info, ADC_INF_FLAG_IPV4_ADDR);
+			adc_msg_remove_named_argument(user->info, ADC_INF_FLAG_IPV4_UDP_PORT);
+		}
+		else if (user->hbri_ip_version == 6)
+		{
+			adc_msg_remove_named_argument(user->info, ADC_INF_FLAG_IPV6_ADDR);
+			adc_msg_remove_named_argument(user->info, ADC_INF_FLAG_IPV6_UDP_PORT);
+		}
+	}
+
+	/* Continue with normal login process */
+	user_set_state(user, state_identify);
+
+	/* Process the stored INF message */
+	if (user->info)
+	{
+		/* Create a copy of the INF message to avoid use-after-free issues */
+		struct adc_message* cmd_copy = adc_msg_copy(user->info);
+		if (cmd_copy)
+		{
+			int ret = hub_handle_info_login(hub, user, cmd_copy);
+			adc_msg_free(cmd_copy);
+			if (ret < 0)
+			{
+				LOG_ERROR("HBRI: Login failed for user %s (nick: %s) after HBRI failure, error code: %d",
+					sid_to_string(user->id.sid), user->id.nick, ret);
+				on_login_failure(hub, user, ret);
+			}
+		}
+		else
+		{
+			LOG_ERROR("HBRI: Failed to copy INF message for user %s (nick: %s)",
+				sid_to_string(user->id.sid), user->id.nick);
+			on_login_failure(hub, user, status_msg_inf_error_cid_invalid);
+		}
+	}
+}
+
+/**
+ * Initiate HBRI validation for a user.
+ * This is called when a user needs to validate they have an IP address
+ * of a different version than their connection (e.g., IPv6 user claiming IPv4).
+ *
+ * @param hub Hub instance
+ * @param user User to validate
+ * @param ip_version IP version to validate (4 or 6)
+ * @return 0 on success, -1 on error
+ */
+int hub_initiate_hbri_validation(struct hub_info* hub, struct hub_user* user, uint8_t ip_version)
+{
+	struct hbri_pending_entry* entry = NULL;
+	struct adc_message* cmd = NULL;
+	char token[9];
+
+	/* Generate validation token */
+	if (!generate_hbri_token(token, sizeof(token)))
+	{
+		LOG_ERROR("HBRI: Failed to generate token for user %s (nick: %s)",
+			sid_to_string(user->id.sid), user->id.nick);
+		return -1;
+	}
+
+	/* Create pending entry */
+	entry = hub_malloc_zero(sizeof(struct hbri_pending_entry));
+	if (!entry)
+	{
+		LOG_ERROR("HBRI: Failed to allocate memory for pending entry");
+		return -1;
+	}
+
+	strncpy(entry->token, token, sizeof(entry->token) - 1);
+	entry->token[sizeof(entry->token) - 1] = '\0';
+	entry->user = user;
+	entry->expires = time(NULL) + 30; /* 30 second timeout */
+	entry->ip_version = ip_version;
+
+	/* Add to pending list */
+	list_append(hub->hbri_pending, entry);
+
+	/* Set user flag */
+	user_flag_set(user, flag_hbri_validating);
+
+	/* Strip feature cast supports for the IP version being validated */
+	user_strip_feature_cast_for_hbri(user, ip_version);
+
+	/* Store token in user struct for reference */
+	strncpy(user->hbri_token, token, sizeof(user->hbri_token) - 1);
+	user->hbri_token[sizeof(user->hbri_token) - 1] = '\0';
+	user->hbri_timeout = entry->expires;
+	user->hbri_ip_version = ip_version;
+
+	/* Create TCP command to send to user */
+	cmd = adc_msg_construct(ADC_CMD_TCP, 64);
+	if (!cmd)
+	{
+		LOG_ERROR("HBRI: Failed to create TCP command for user %s", sid_to_string(user->id.sid));
+		list_remove(hub->hbri_pending, entry);
+		hub_free(entry);
+		return -1;
+	}
+
+	/* Add token parameter */
+	adc_msg_add_named_argument_string(cmd, "TO", token);
+
+	/* Add IP version specific parameters */
+	if (ip_version == 4)
+	{
+		adc_msg_add_named_argument_string(cmd, "I4", "0.0.0.0");
+		adc_msg_add_named_argument_string(cmd, "U4", "0");
+	}
+	else if (ip_version == 6)
+	{
+		adc_msg_add_named_argument_string(cmd, "I6", "::");
+		adc_msg_add_named_argument_string(cmd, "U6", "0");
+	}
+
+	/* Send the TCP command to the user */
+	LOG_INFO("HBRI: Initiated validation for user %s (nick: %s), token=%s, ipv=%d, connection_ip=%s",
+		sid_to_string(user->id.sid), user->id.nick, token, ip_version, user_get_address(user));
+
+	route_to_user(hub, user, cmd);
+	adc_msg_free(cmd);
+	return 0;
+}
+
+/**
+ * Continue user login after successful HBRI validation.
+ * @param hub Hub instance
+ * @param user User who passed HBRI validation
+ * @return 0 on success, -1 on error
+ */
+int hub_continue_login_after_hbri(struct hub_info* hub, struct hub_user* user)
+{
+	int ret;
+
+	if (!user || !user->info || user->state != state_hbri_waiting)
+	{
+		LOG_ERROR("HBRI: Cannot continue login for invalid user state (user=%p, info=%p, state=%d)",
+			user, user ? user->info : NULL, user ? user->state : -1);
+		return -1;
+	}
+
+	LOG_INFO("HBRI: Continuing login process for user %s (nick: %s)",
+		sid_to_string(user->id.sid), user->id.nick);
+
+	/* Process the stored INF message */
+	/* Create a copy of the INF message to avoid use-after-free issues */
+	struct adc_message* cmd_copy = adc_msg_copy(user->info);
+	if (!cmd_copy)
+	{
+		LOG_ERROR("HBRI: Failed to copy INF message for user %s (nick: %s)",
+			sid_to_string(user->id.sid), user->id.nick);
+		on_login_failure(hub, user, status_msg_inf_error_cid_invalid);
+		return -1;
+	}
+
+	ret = hub_handle_info_login(hub, user, cmd_copy);
+	adc_msg_free(cmd_copy);
+	if (ret < 0)
+	{
+		LOG_ERROR("HBRI: Login failed for user %s (nick: %s) after validation, error code: %d",
+			sid_to_string(user->id.sid), user->id.nick, ret);
+		on_login_failure(hub, user, ret);
+		return -1;
+	}
+	else
+	{
+		/* Post a message, the user has joined */
+		struct event_data post;
+		memset(&post, 0, sizeof(post));
+		post.id    = UHUB_EVENT_USER_JOIN;
+		post.ptr   = user;
+		post.flags = ret; /* 0 - all OK, 1 - need authentication */
+		event_queue_post(hub->queue, &post);
+		LOG_INFO("HBRI: User %s (nick: %s) login continued successfully, flags: %d",
+			sid_to_string(user->id.sid), user->id.nick, ret);
+		return 0;
+	}
+}
+
+/**
+ * HBRI timeout callback function.
+ * Checks for expired HBRI validations and cleans them up.
+ */
+static void hub_hbri_timeout_callback(struct timeout_evt* t)
+{
+	struct hub_info* hub = (struct hub_info*) t->ptr;
+	struct hbri_pending_entry* entry = NULL;
+	struct node* node = NULL;
+	struct node* next_node = NULL;
+	time_t now = time(NULL);
+
+	if (!hub || !hub->hbri_pending)
+		return;
+
+	/* Check for expired validations */
+	node = list_get_first_node(hub->hbri_pending);
+	while (node)
+	{
+		next_node = node->next;
+		entry = (struct hbri_pending_entry*) list_get(node);
+
+		if (entry && entry->expires < now)
+		{
+			LOG_INFO("HBRI: Validation token %s expired for user %s (nick: %s)",
+				entry->token, sid_to_string(entry->user->id.sid),
+				entry->user->id.nick);
+
+			/* Clear user's HBRI validation flag */
+			user_flag_unset(entry->user, flag_hbri_validating);
+
+			/* If user was waiting for HBRI validation, allow them to continue */
+			if (entry->user->state == state_hbri_waiting)
+			{
+				LOG_INFO("HBRI: HBRI timeout for user %s (nick: %s), allowing to continue without validated IP",
+					sid_to_string(entry->user->id.sid), entry->user->id.nick);
+				/* Send HBRI timeout status to user */
+				hub_send_status(hub, entry->user, status_msg_hbri_timeout, status_level_error);
+				/* Allow user to continue without validated IP */
+				hub_fail_hbri_validation(hub, entry->user);
+			}
+
+			/* Remove from list */
+			list_remove_node(hub->hbri_pending, node);
+			hub_free(entry);
+		}
+
+		node = next_node;
+	}
+
+	/* Reschedule for next check */
+	timeout_queue_reschedule(net_backend_get_timeout_queue(), hub->hbri_timeout, 1);
 }

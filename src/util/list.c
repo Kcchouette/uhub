@@ -335,3 +335,63 @@ void* list_get_prev(struct linked_list* list)
 	return list->iterator->ptr;
 }
 
+void* list_get(struct node* node)
+{
+	if (node == NULL)
+		return NULL;
+	
+	return node->ptr;
+}
+
+struct node* list_get_first_node(struct linked_list* list)
+{
+	return list->first;
+}
+
+struct node* list_get_current_node(struct linked_list* list)
+{
+	return list->iterator;
+}
+
+void list_remove_node(struct linked_list* list, struct node* node)
+{
+	struct node* current;
+	
+	if (list == NULL || node == NULL)
+		return;
+	
+	/* Update list iterator if it points to the node being removed */
+	if (list->iterator == node)
+	{
+		list->iterator = node->next;
+	}
+	
+	/* Update previous node */
+	if (node->prev)
+	{
+		node->prev->next = node->next;
+	}
+	else
+	{
+		/* Node is first in list */
+		list->first = node->next;
+	}
+	
+	/* Update next node */
+	if (node->next)
+	{
+		node->next->prev = node->prev;
+	}
+	else
+	{
+		/* Node is last in list */
+		list->last = node->prev;
+	}
+	
+	/* Update list size */
+	list->size--;
+	
+	/* Free the node */
+	hub_free(node);
+}
+

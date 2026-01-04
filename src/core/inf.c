@@ -189,6 +189,10 @@ static int check_required_login_flags(struct hub_info* hub, struct hub_user* use
 static int check_network(struct hub_info* hub, struct hub_user* user, struct adc_message* cmd)
 {
 	const char* address = user_get_address(user);
+	char* claimed_ipv4 = NULL;
+	char* claimed_ipv6 = NULL;
+	int needs_hbri_validation = 0;
+	uint8_t ip_version_to_validate = 0;
 
 	/* Check for NAT override address */
 	if (acl_is_ip_nat_override(hub->acl, address))
@@ -205,20 +209,117 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		hub_free(client_given_ip);
 	}
 
-	if (strchr(address, '.'))
+	/* Get claimed IP addresses */
+	claimed_ipv4 = adc_msg_get_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+	claimed_ipv6 = adc_msg_get_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+
+	/* Check if HBRI validation is needed */
+	if (!user_is_ipv6(user)) /* User connected with IPv4 */
 	{
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
-		adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR, address);
+		if (claimed_ipv6 && claimed_ipv6[0] != '\0')
+		{
+			/* IPv4 user claiming IPv6 address - needs HBRI validation */
+			needs_hbri_validation = 1;
+			ip_version_to_validate = 6;
+			LOG_INFO("HBRI: IPv4 user %s (nick: %s) claiming IPv6 address %s - validation needed",
+				sid_to_string(user->id.sid), user->id.nick, claimed_ipv6);
+		}
+		else if (claimed_ipv4 && claimed_ipv4[0] != '\0')
+		{
+			/* IPv4 user claiming IPv4 address - normal case */
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+			adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR, address);
+		}
+		else
+		{
+			/* No IP claimed, use connection IP */
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+			adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR, address);
+		}
 	}
-	else if (strchr(address, ':'))
+	else if (user_is_ipv6(user)) /* User connected with IPv6 */
 	{
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
-		adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
-		adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR, address);
+		if (claimed_ipv4 && claimed_ipv4[0] != '\0')
+		{
+			/* IPv6 user claiming IPv4 address - needs HBRI validation */
+			needs_hbri_validation = 1;
+			ip_version_to_validate = 4;
+			LOG_INFO("HBRI: IPv6 user %s (nick: %s) claiming IPv4 address %s - validation needed",
+				sid_to_string(user->id.sid), user->id.nick, claimed_ipv4);
+		}
+		else if (claimed_ipv6 && claimed_ipv6[0] != '\0')
+		{
+			/* IPv6 user claiming IPv6 address - normal case */
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+			adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR, address);
+		}
+		else
+		{
+			/* No IP claimed, use connection IP */
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
+			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+			adc_msg_add_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR, address);
+		}
 	}
+
+	/* Clean up */
+	if (claimed_ipv4)
+		hub_free(claimed_ipv4);
+	if (claimed_ipv6)
+		hub_free(claimed_ipv6);
+
+	/* Initiate HBRI validation if needed */
+	if (needs_hbri_validation)
+	{
+		/* Check if HBRI is enabled in configuration */
+		if (!hub->config->hbri_enable)
+		{
+			LOG_INFO("HBRI: Validation needed for user %s (nick: %s) but HBRI is disabled in configuration",
+				sid_to_string(user->id.sid), user->id.nick);
+			/* Strip the IP address that requires validation */
+			if (ip_version_to_validate == 4)
+			{
+				adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
+				adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
+			}
+			else if (ip_version_to_validate == 6)
+			{
+				adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
+				adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
+			}
+			return 0;
+		}
+		
+		/* Store the INF message for later use */
+		if (user->info)
+			adc_msg_free(user->info);
+		user->info = adc_msg_copy(cmd);
+		
+		/* Set user to HBRI waiting state */
+		user_set_state(user, state_hbri_waiting);
+		
+		/* Initiate HBRI validation */
+		if (hub_initiate_hbri_validation(hub, user, ip_version_to_validate) == 0)
+		{
+			/* Return non-zero to indicate processing is not complete */
+			return 1;
+		}
+		else
+		{
+			/* HBRI initiation failed, fall back to normal processing */
+			LOG_ERROR("HBRI: Failed to initiate validation for user %s (nick: %s)",
+				sid_to_string(user->id.sid), user->id.nick);
+			user_set_state(user, state_identify);
+		}
+	}
+
 	return 0;
 }
 

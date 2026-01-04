@@ -32,6 +32,7 @@ enum user_state
 	state_normal       = 3,      /**<< "User is logged in." */
 	state_cleanup      = 4,      /**<< "User is disconnected, but other users need to be notified." */
 	state_disconnected = 5,      /**<< "User is disconnected" */
+	state_hbri_waiting = 6,      /**<< "User is waiting for HBRI validation" */
 };
 
 enum user_flags
@@ -49,16 +50,19 @@ enum user_flags
 	feature_bas0    = 0x00000400, /** BAS0: Obsolete pre-ADC/1.0 protocol version */
 	feature_hbri    = 0x00000800, /** HBRI: IPv4/6 verification for hybrid hubs (not supported) */
 	feature_dht     = 0x00001000, /** DHT0: Distributed hash table peer-to-peer sharing (not supported) */
-	flag_flood      = 0x00400000, /** User has been notified about flooding. */
-	flag_muted      = 0x00800000, /** User is muted (cannot chat) */
-	flag_ignore     = 0x01000000, /** Ignore further reads */
-	flag_maxbuf     = 0x02000000, /** Hit max buf read, ignore msg */
-	flag_choke      = 0x04000000, /** Choked: Cannot send, waiting for write event */
-	flag_want_read  = 0x08000000, /** Need to read (SSL) */
-	flag_want_write = 0x10000000, /** Need to write (SSL) */
-	flag_user_list  = 0x20000000, /** Send queue bypass (when receiving the send queue) */
-	flag_pipeline   = 0x40000000, /** Hub message pipelining */
-	flag_nat        = 0x80000000, /** nat override enabled */
+	flag_ipv4_validated = 0x00100000, /** IPv4 address has been validated via HBRI */
+	flag_ipv6_validated = 0x00200000, /** IPv6 address has been validated via HBRI */
+	flag_hbri_validating = 0x00400000, /** HBRI: User is undergoing HBRI validation */
+	flag_flood      = 0x00800000, /** User has been notified about flooding. */
+	flag_muted      = 0x01000000, /** User is muted (cannot chat) */
+	flag_ignore     = 0x02000000, /** Ignore further reads */
+	flag_maxbuf     = 0x04000000, /** Hit max buf read, ignore msg */
+	flag_choke      = 0x08000000, /** Choked: Cannot send, waiting for write event */
+	flag_want_read  = 0x10000000, /** Need to read (SSL) */
+	flag_want_write = 0x20000000, /** Need to write (SSL) */
+	flag_user_list  = 0x40000000, /** Send queue bypass (when receiving the send queue) */
+	flag_pipeline   = 0x80000000, /** Hub message pipelining */
+	flag_nat        = 0x00080000, /** nat override enabled */
 };
 
 enum user_quit_reason
@@ -76,6 +80,7 @@ enum user_quit_reason
 	quit_update_error   = 10,    /** Update error. INF update changed share/slot info and no longer satisfies the hub limits. */
 	quit_hub_disabled   = 11,    /** Hub is disabled. No new connections allowed */
 	quit_ghost_timeout  = 12,    /** The user is a ghost, and trying to login from another connection */
+	quit_hbri           = 13,    /** HBRI validation connection */
 };
 
 /** Returns an appropriate string for the given quit reason */
@@ -120,6 +125,11 @@ struct hub_user
 	struct net_connection*  connection;         /** Connection data */
 	struct hub_user_limits  limits;             /** Data used for limitation */
 	enum user_quit_reason   quit_reason;        /** Quit reason (see user_quit_reason) */
+
+	/* HBRI (Hybrid Bridge) validation fields */
+	char                    hbri_token[9];      /** Token for HBRI validation (8 chars + null) */
+	time_t                  hbri_timeout;       /** Time when HBRI validation expires */
+	uint8_t                 hbri_ip_version;    /** IP version being validated (4 or 6) */
 
 	struct flood_control   flood_chat;
 	struct flood_control   flood_connect;
@@ -226,7 +236,14 @@ extern void user_support_add(struct hub_user* user, int fourcc);
  */
 extern void user_support_remove(struct hub_user* user, int fourcc);
 
-extern const char* user_get_address(struct hub_user* user);
+const char* user_get_address(struct hub_user* user);
+
+/**
+ * Check if a user is connected via IPv6.
+ * @param user User to check
+ * @return 1 if user is connected via IPv6, 0 otherwise
+ */
+extern int user_is_ipv6(struct hub_user* user);
 
 /**
  * Sets the nat override flag for a user, this allows users on the same
@@ -269,6 +286,15 @@ extern int user_set_feature_cast_support(struct hub_user* u, char feature[4]);
  * Remove all feature cast support features.
  */
 extern void user_clear_feature_cast_support(struct hub_user* u);
+
+/**
+ * Strip feature cast supports for HBRI validation.
+ * Removes TCP4/UDP4 when validating IPv4, or TCP6/UDP6 when validating IPv6.
+ *
+ * @param u User to strip features from
+ * @param ip_version IP version being validated (4 or 6)
+ */
+extern void user_strip_feature_cast_for_hbri(struct hub_user* u, uint8_t ip_version);
 
 /**
  * Mark the user with a want-write flag, meaning it should poll for writability.
