@@ -221,8 +221,15 @@ void net_cleanup_process(struct net_cleanup_handler* handler)
 	for (n = 0; n < handler->num; n++)
 	{
 		struct net_connection* con = handler->queue[n];
-		LOG_TRACE("net_cleanup_process: free: %p", con);
-		net_con_destroy(con);
+		if (con)
+		{
+			LOG_TRACE("net_cleanup_process: free: %p", con);
+			net_con_destroy(con);
+		}
+		else
+		{
+			LOG_WARN("net_cleanup_process: NULL connection in cleanup queue");
+		}
 	}
 	handler->num = 0;
 }
