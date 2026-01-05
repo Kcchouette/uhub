@@ -721,7 +721,6 @@ static void server_alt_port_clear(void* ptr)
 	if (con)
 	{
 		net_con_close(con);
-		hub_free(con);
 	}
 }
 

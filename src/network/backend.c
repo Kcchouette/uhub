@@ -205,6 +205,12 @@ void net_cleanup_shutdown(struct net_cleanup_handler* handler)
 
 void net_cleanup_delayed_free(struct net_cleanup_handler* handler, struct net_connection* con)
 {
+	if (handler->num >= handler->max)
+	{
+		LOG_ERROR("net_cleanup_delayed_free: cleanup queue overflow (%zu >= %zu), freeing connection immediately", handler->num, handler->max);
+		net_con_destroy(con);
+		return;
+	}
 	handler->queue[handler->num++] = con;
 	con->flags |= NET_CLEANUP;
 }
