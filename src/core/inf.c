@@ -216,7 +216,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 	/* Check if HBRI validation is needed */
 	if (!user_is_ipv6(user)) /* User connected with IPv4 */
 	{
-		if (claimed_ipv6 && claimed_ipv6[0] != '\0')
+		if (claimed_ipv6 && claimed_ipv6[0] != '\0' && strcmp(claimed_ipv6, "::") != 0)
 		{
 			/* IPv4 user claiming IPv6 address - needs HBRI validation */
 			needs_hbri_validation = 1;
@@ -224,7 +224,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 			LOG_INFO("HBRI: IPv4 user %s (nick: %s) claiming IPv6 address %s - validation needed",
 				sid_to_string(user->id.sid), user->id.nick, claimed_ipv6);
 		}
-		else if (claimed_ipv4 && claimed_ipv4[0] != '\0')
+		else if (claimed_ipv4 && claimed_ipv4[0] != '\0' && strcmp(claimed_ipv4, "0.0.0.0") != 0)
 		{
 			/* IPv4 user claiming IPv4 address - normal case */
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
@@ -234,7 +234,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		}
 		else
 		{
-			/* No IP claimed, use connection IP */
+			/* No IP claimed or zero IP claimed, use connection IP */
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
@@ -243,7 +243,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 	}
 	else if (user_is_ipv6(user)) /* User connected with IPv6 */
 	{
-		if (claimed_ipv4 && claimed_ipv4[0] != '\0')
+		if (claimed_ipv4 && claimed_ipv4[0] != '\0' && strcmp(claimed_ipv4, "0.0.0.0") != 0)
 		{
 			/* IPv6 user claiming IPv4 address - needs HBRI validation */
 			needs_hbri_validation = 1;
@@ -251,7 +251,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 			LOG_INFO("HBRI: IPv6 user %s (nick: %s) claiming IPv4 address %s - validation needed",
 				sid_to_string(user->id.sid), user->id.nick, claimed_ipv4);
 		}
-		else if (claimed_ipv6 && claimed_ipv6[0] != '\0')
+		else if (claimed_ipv6 && claimed_ipv6[0] != '\0' && strcmp(claimed_ipv6, "::") != 0)
 		{
 			/* IPv6 user claiming IPv6 address - normal case */
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
@@ -261,7 +261,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		}
 		else
 		{
-			/* No IP claimed, use connection IP */
+			/* No IP claimed or zero IP claimed, use connection IP */
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
