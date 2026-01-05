@@ -592,6 +592,13 @@ static void hub_event_dispatcher(void* callback_data, struct event_data* message
 				user_destroy(user);
 				user = (struct hub_user*) list_get_first(hub->users->list);
 			}
+			/* Clear the user list to prevent uman_shutdown from
+			 * trying to destroy users again, which would cause double-free.
+			 * We use NULL callback since users are already destroyed. */
+			if (hub->users && hub->users->list)
+			{
+				list_clear(hub->users->list, NULL);
+			}
 			break;
 
 
@@ -894,8 +901,10 @@ void hub_shutdown_service(struct hub_info* hub)
 	// Clean up HBRI pending list
 	if (hub->hbri_pending)
 	{
-		list_clear(hub->hbri_pending, NULL); // Entries will be freed below
+		// Free all pending HBRI entries
+		list_clear(hub->hbri_pending, &hub_free);
 		list_destroy(hub->hbri_pending);
+		hub->hbri_pending = NULL;
 	}
 
 	// Clean up HBRI timeout handler
