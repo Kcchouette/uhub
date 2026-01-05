@@ -194,6 +194,9 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 	int needs_hbri_validation = 0;
 	uint8_t ip_version_to_validate = 0;
 
+	LOG_DEBUG("check_network: User %s (nick: %s) connection address: %s, user_is_ipv6=%d",
+		sid_to_string(user->id.sid), user->id.nick, address, user_is_ipv6(user));
+
 	/* Check for NAT override address */
 	if (acl_is_ip_nat_override(hub->acl, address))
 	{
@@ -213,9 +216,14 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 	claimed_ipv4 = adc_msg_get_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
 	claimed_ipv6 = adc_msg_get_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
 
+	LOG_DEBUG("check_network: Claimed IPv4: %s, Claimed IPv6: %s",
+		claimed_ipv4 ? claimed_ipv4 : "(null)",
+		claimed_ipv6 ? claimed_ipv6 : "(null)");
+
 	/* Check if HBRI validation is needed */
 	if (!user_is_ipv6(user)) /* User connected with IPv4 */
 	{
+		LOG_DEBUG("check_network: User connected with IPv4");
 		if (claimed_ipv6 && claimed_ipv6[0] != '\0' && strcmp(claimed_ipv6, "::") != 0)
 		{
 			/* IPv4 user claiming IPv6 address - needs HBRI validation */
@@ -223,10 +231,13 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 			ip_version_to_validate = 6;
 			LOG_INFO("HBRI: IPv4 user %s (nick: %s) claiming IPv6 address %s - validation needed",
 				sid_to_string(user->id.sid), user->id.nick, claimed_ipv6);
+			LOG_DEBUG("check_network: IPv4 user claiming IPv6, needs HBRI validation (hbri_enable=%d)",
+				hub->config->hbri_enable);
 		}
 		else if (claimed_ipv4 && claimed_ipv4[0] != '\0' && strcmp(claimed_ipv4, "0.0.0.0") != 0)
 		{
 			/* IPv4 user claiming IPv4 address - normal case */
+			LOG_DEBUG("check_network: IPv4 user claiming IPv4 address, normal case");
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
@@ -235,6 +246,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		else
 		{
 			/* No IP claimed or zero IP claimed, use connection IP */
+			LOG_DEBUG("check_network: No IP claimed, using connection IP: %s", address);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
@@ -243,6 +255,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 	}
 	else if (user_is_ipv6(user)) /* User connected with IPv6 */
 	{
+		LOG_DEBUG("check_network: User connected with IPv6");
 		if (claimed_ipv4 && claimed_ipv4[0] != '\0' && strcmp(claimed_ipv4, "0.0.0.0") != 0)
 		{
 			/* IPv6 user claiming IPv4 address - needs HBRI validation */
@@ -250,10 +263,13 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 			ip_version_to_validate = 4;
 			LOG_INFO("HBRI: IPv6 user %s (nick: %s) claiming IPv4 address %s - validation needed",
 				sid_to_string(user->id.sid), user->id.nick, claimed_ipv4);
+			LOG_DEBUG("check_network: IPv6 user claiming IPv4, needs HBRI validation (hbri_enable=%d)",
+				hub->config->hbri_enable);
 		}
 		else if (claimed_ipv6 && claimed_ipv6[0] != '\0' && strcmp(claimed_ipv6, "::") != 0)
 		{
 			/* IPv6 user claiming IPv6 address - normal case */
+			LOG_DEBUG("check_network: IPv6 user claiming IPv6 address, normal case");
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
@@ -262,6 +278,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		else
 		{
 			/* No IP claimed or zero IP claimed, use connection IP */
+			LOG_DEBUG("check_network: No IP claimed, using connection IP: %s", address);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_ADDR);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV4_UDP_PORT);
 			adc_msg_remove_named_argument(cmd, ADC_INF_FLAG_IPV6_ADDR);
@@ -283,6 +300,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 		{
 			LOG_INFO("HBRI: Validation needed for user %s (nick: %s) but HBRI is disabled in configuration",
 				sid_to_string(user->id.sid), user->id.nick);
+			LOG_DEBUG("check_network: HBRI disabled, stripping IP version %d", ip_version_to_validate);
 			/* Strip the IP address that requires validation */
 			if (ip_version_to_validate == 4)
 			{

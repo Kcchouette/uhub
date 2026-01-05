@@ -393,19 +393,30 @@ int net_accept(int fd, struct ip_addr_encap* ipaddr)
 			{
 				char address[INET6_ADDRSTRLEN+1] = { 0, };
 				net_address_to_string(AF_INET6, (void*) &addr6->sin6_addr, address, INET6_ADDRSTRLEN+1);
-				if (is_ipv4_mapped(address))
+				/* Check if this is an IPv4-mapped IPv6 address by examining the binary data */
+				const uint8_t ipv4_mapped[12] = {
+					0, 0,    0, 0,
+					0, 0,    0, 0,
+					0, 0, 0xff, 0xff
+				};
+				
+				if (memcmp(&addr6->sin6_addr, ipv4_mapped, 12) == 0)
 				{
-					/* Hack to convert IPv6 mapped IPv4 addresses to true IPv4 addresses */
+					LOG_DEBUG("net_accept: IPv4-mapped IPv6 address detected: %s, converting to AF_INET", address);
+					/* This is an IPv4-mapped IPv6 address, convert to true IPv4 */
 					ipaddr->af = AF_INET;
-					net_string_to_address(AF_INET, address, (void*) &ipaddr->internal_ip_data.in);
+					/* Copy the last 32-bits (IPv4 address) */
+					memcpy(&ipaddr->internal_ip_data.in, ((char*) &addr6->sin6_addr) + 12, sizeof(struct in_addr));
 				}
 				else
 				{
+					LOG_DEBUG("net_accept: Not an IPv4-mapped IPv6 address: %s, keeping as AF_INET6", address);
 					memcpy(&ipaddr->internal_ip_data.in6, &addr6->sin6_addr, sizeof(struct in6_addr));
 				}
 			}
 			else
 			{
+				LOG_DEBUG("net_accept: Copying IPv4 address data");
 				memcpy(&ipaddr->internal_ip_data.in, &addr4->sin_addr, sizeof(struct in_addr));
 			}
 		}
@@ -546,6 +557,7 @@ const char* net_address_to_string(int af, const void* src, char* dst, socklen_t 
 	/* IPv4-mapped IPv6 address, print it like a normal IPv4 address */
 	if (af == AF_INET6 && memcmp(src, ipv4_mapped, 12) == 0)
 	{
+		LOG_DEBUG("net_address_to_string: IPv4-mapped IPv6 address detected, converting to IPv4");
 		/* Copy the last 32-bits to the temporary ipv4 address struct */
 		memcpy(&tmp, ((char*) src) + 12, 4);
 		src = &tmp;
@@ -589,15 +601,21 @@ const char* net_address_to_string(int af, const void* src, char* dst, socklen_t 
 	if (!inet_ntop(af, src, dst, cnt))
 		return NULL;
 
+	LOG_DEBUG("net_address_to_string: inet_ntop returned: %s (af=%d)", dst, af);
+	
 	/* IPv6 mapped IPv4 address. */
 	if (af == AF_INET6)
 	{
 		int offset = is_ipv4_mapped(dst);
 		if (offset > 0)
+		{
+			LOG_DEBUG("net_address_to_string: Stripping IPv4-mapped prefix from: %s", dst);
 			memmove(dst, dst + offset, cnt - offset);
+		}
 	}
 #endif
 
+	LOG_DEBUG("net_address_to_string: Final result: %s", dst);
 	return dst;
 }
 

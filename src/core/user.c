@@ -411,35 +411,18 @@ int user_is_ipv6(struct hub_user* user)
 	/* Check if this is an IPv4-mapped IPv6 address */
 	if (user->id.addr.af == AF_INET6)
 	{
-		char address[INET6_ADDRSTRLEN + 1];
-		memset(address, 0, sizeof(address));
-		net_address_to_string(AF_INET6, (void*) &user->id.addr.internal_ip_data, address, sizeof(address));
+		/* Check for IPv4-mapped IPv6 address by examining the binary data */
+		const uint8_t ipv4_mapped[12] = {
+			0, 0,    0, 0,
+			0, 0,    0, 0,
+			0, 0, 0xff, 0xff
+		};
 		
-		/* Check for ::ffff: prefix followed by IPv4 address */
-		if (strncmp(address, "::ffff:", 7) == 0)
+		if (memcmp(&user->id.addr.internal_ip_data, ipv4_mapped, 12) == 0)
 		{
-			/* Skip over the ::ffff: prefix */
-			const char* ipv4_part = address + 7;
-			int periods = 0;
-			int all_digits_or_dots = 1;
-			
-			/* Check if the rest is an IPv4 address */
-			for (const char* p = ipv4_part; *p; p++)
-			{
-				if (*p == '.')
-					periods++;
-				else if (!is_num(*p))
-				{
-					all_digits_or_dots = 0;
-					break;
-				}
-			}
-			
-			if (periods == 3 && all_digits_or_dots)
-			{
-				/* This is an IPv4-mapped IPv6 address, treat as IPv4 */
-				return 0;
-			}
+			/* This is an IPv4-mapped IPv6 address, treat as IPv4 */
+			LOG_DEBUG("user_is_ipv6: IPv4-mapped IPv6 address detected -> treating as IPv4");
+			return 0;
 		}
 	}
 	
