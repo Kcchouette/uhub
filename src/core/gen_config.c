@@ -1070,6 +1070,7 @@ int apply_config(struct hub_config* config, const char* key, const char* data, i
 			LOG_ERROR("\"hbri_enable\" (boolean), default=0");
 			return -1;
 		}
+		LOG_INFO("Configuration: HBRI enabled: %d", config->hbri_enable);
 		return 0;
 	}
 

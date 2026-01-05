@@ -975,12 +975,14 @@ void hub_set_variables(struct hub_info* hub, struct acl_handle* acl)
 	}
 
 	/* Build support message with optional HBRI support */
+	LOG_DEBUG("hub_set_variables: HBRI enabled: %d", hub->config->hbri_enable);
 	if (hub->config->hbri_enable)
 	{
 		hub->command_support = adc_msg_construct(ADC_CMD_ISUP, 6 + strlen(ADC_PROTO_SUPPORT) + 7); /* +7 for " ADHBRI" */
 		if (hub->command_support)
 		{
 			adc_msg_add_argument(hub->command_support, ADC_PROTO_SUPPORT " ADHBRI");
+			LOG_INFO("HBRI: Advertising ADHBRI support in ISUP message");
 		}
 	}
 	else

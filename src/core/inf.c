@@ -196,6 +196,7 @@ static int check_network(struct hub_info* hub, struct hub_user* user, struct adc
 
 	LOG_DEBUG("check_network: User %s (nick: %s) connection address: %s, user_is_ipv6=%d",
 		sid_to_string(user->id.sid), user->id.nick, address, user_is_ipv6(user));
+	LOG_DEBUG("check_network: HBRI enabled: %d", hub->config->hbri_enable);
 
 	/* Check for NAT override address */
 	if (acl_is_ip_nat_override(hub->acl, address))
